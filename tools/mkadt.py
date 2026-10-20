@@ -3,7 +3,7 @@
 
 Only what the early boot path actually reads (see PORTING.md); every MMIO
 address comes from the fajita live FDT / downstream sdm845 DT.
-Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem]
+Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem] [--board=fajita|dumpling] [--dram-size=N]
 """
 import hashlib, os, struct, sys
 
@@ -45,6 +45,25 @@ QEMU_VTIMER_INTID = 27
 
 BOOT_MANIFEST_HASH = hashlib.sha384(b'sweet boot manifest').digest()
 
+# Per-board overrides of the constants above (defaults stay the fajita/SDM845
+# values; dumpling/MSM8998 values were read from this unit's stock boot.img
+# DTB, see docs/dumpling-deltas.md). cpus: (mpidr, clock_hz) per node, listed
+# in ADT order; XNU picks the boot CPU by matching MPIDR.
+BOARDS = {
+    'fajita': {},
+    'dumpling': dict(
+        GICR=0x17b00000, GICR_SIZE=0x100000,
+        FB=0x9d600000, FB_W=1080, FB_H=2160,
+        UFS=0x01da4000,
+        HIGH_PHYS_BASE=0x100000000, HIGH_MEM_SIZE=0x17c000000,
+        fw='dumpling-shim',
+        cpus=((0x400, 2553600000), (0x500, 2553600000)),  # 2x Kryo 280 gold (A73)
+        cpu_compat='qcom,kryo385',   # SweetCPU matches this string
+        root_compat=('D22AP', 'iPhone10,3', 'xiaomi,sweet', 'oneplus,dumpling',
+                     'qcom,msm8998', 'AppleARM'),
+    ),
+}
+
 # The iOS userland is the iPhone X (iPhone10,3 / D22AP) IPSW. MobileGestalt
 # derives product type, device class, home-button-less UI, artwork etc. from
 # the root identity and /product of the real D22AP device tree. That tree is
@@ -78,9 +97,18 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False, mem_size=None):
+def build(seed=None, qemu=False, highmem=False, mem_size=None, board='fajita'):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
-    phys_base, mem_size_default = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
+    B = dict(GICD=GICD, GICD_SIZE=GICD_SIZE, GICR=GICR, GICR_SIZE=GICR_SIZE,
+             FB=FB, FB_SIZE=FB_SIZE, FB_W=FB_W, FB_H=FB_H, FB_STRIDE=FB_STRIDE,
+             UFS=UFS, UFS_SIZE=UFS_SIZE, PHYS_BASE=PHYS_BASE, MEM_SIZE=MEM_SIZE,
+             HIGH_PHYS_BASE=HIGH_PHYS_BASE, HIGH_MEM_SIZE=HIGH_MEM_SIZE,
+             fw='sweet-shim', cpu_compat='qcom,kryo385',
+             cpus=None,  # None = the fajita 8-core layout below
+             root_compat=('D22AP', 'iPhone10,3', 'xiaomi,sweet', 'oneplus,fajita',
+                          'qcom,sdm845', 'AppleARM'))
+    B.update(BOARDS.get(board, {}))
+    phys_base, mem_size_default = (B['HIGH_PHYS_BASE'], B['HIGH_MEM_SIZE']) if highmem else (B['PHYS_BASE'], B['MEM_SIZE'])
     mem_size = mem_size if mem_size is not None else mem_size_default
     # Panic-log region: the last PANIC_LOG_SIZE bytes of the dram range, so it is
     # physically present but never handed out by the xnu allocator.
@@ -89,7 +117,7 @@ def build(seed=None, qemu=False, highmem=False, mem_size=None):
         panic_size = PANIC_LOG_SIZE
         mem_size -= panic_size
         panic_pa = phys_base + mem_size
-    gicd, gicr, timebase = (QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE) if qemu else (GICD, GICR, TIMEBASE)
+    gicd, gicr, timebase = (QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE) if qemu else (B['GICD'], B['GICR'], TIMEBASE)
     seed = seed if seed is not None else os.urandom(64)
     phandle = iter(range(1, 1000))
     ph = lambda: ('AAPL,phandle', u32(next(phandle)))
@@ -103,8 +131,8 @@ def build(seed=None, qemu=False, highmem=False, mem_size=None):
         *([('embedded-panic-log-size', u32(panic_size))] if panic_size else []),
         ('random-seed', seed),
         ('debug-enabled', u32(1)),
-        ('firmware-version', cstr('sweet-shim')),
-        ('system-firmware-version', cstr('sweet-shim')),
+        ('firmware-version', cstr(B['fw'])),
+        ('system-firmware-version', cstr(B['fw'])),
         # iBoot's SHA-384 of the boot manifest; /sbin/mount -P 1 exits unless
         # it exists (bind mounts /private/preboot/<hex>/usr/standalone/firmware,
         # tolerating a missing directory). Fixed stand-in value.
@@ -147,27 +175,53 @@ def build(seed=None, qemu=False, highmem=False, mem_size=None):
     # SDM845 MPIDR = logical core << 8: 0x000, 0x100, ..., 0x700 (both clusters).
     # QEMU retains its original single-CPU tree.
     cpu_nodes = []
-    for core in range(1 if qemu else 8):
-        cpu_nodes.append(node(f'cpu{core}', [
-            ph(),
-            ('device_type', cstr('cpu')),
-            ('compatible', cstr('qcom,kryo385') + cstr('ARM,v8')),
-            ('reg', u32(core << 8)),  # actual MPIDR Aff1:Aff0, NOT logical ID
-            ('cpu-id', u32(core)),   # descriptive: XNU assigns IDs by DT order
-            ('cluster-id', u32(0)),  # descriptive; see ml_parse_cpu_topology
-            ('cluster-type', u32(0)),  # homogeneous CLUSTER_TYPE_SMP, not AMP
-            ('die-cluster-id', u32(0)),
-            ('cluster-core-id', u32(core)),
-            ('l2-cache-id', u32(core)),  # distinct per-core L2 nodes in live FDT
-            ('l3-cache-id', u32(0)),     # shared L3
-            ('state', cstr('running' if core == 0 else 'stopped')),
-            ('timebase-frequency', u32(timebase)),
-            ('clock-frequency', u32(2803200000 if core >= 4 else 1766400000)),
-            ('bus-frequency', u32(100000000)),
-            ('memory-frequency', u32(1866000000)),
-            ('peripheral-frequency', u32(timebase)),
-            ('fixed-frequency', u32(timebase)),
-        ]))
+    if B['cpus'] is None:
+        for core in range(1 if qemu else 8):
+            cpu_nodes.append(node(f'cpu{core}', [
+                ph(),
+                ('device_type', cstr('cpu')),
+                ('compatible', cstr('qcom,kryo385') + cstr('ARM,v8')),
+                ('reg', u32(core << 8)),  # actual MPIDR Aff1:Aff0, NOT logical ID
+                ('cpu-id', u32(core)),   # descriptive: XNU assigns IDs by DT order
+                ('cluster-id', u32(0)),  # descriptive; see ml_parse_cpu_topology
+                ('cluster-type', u32(0)),  # homogeneous CLUSTER_TYPE_SMP, not AMP
+                ('die-cluster-id', u32(0)),
+                ('cluster-core-id', u32(core)),
+                ('l2-cache-id', u32(core)),  # distinct per-core L2 nodes in live FDT
+                ('l3-cache-id', u32(0)),     # shared L3
+                ('state', cstr('running' if core == 0 else 'stopped')),
+                ('timebase-frequency', u32(timebase)),
+                ('clock-frequency', u32(2803200000 if core >= 4 else 1766400000)),
+                ('bus-frequency', u32(100000000)),
+                ('memory-frequency', u32(1866000000)),
+                ('peripheral-frequency', u32(timebase)),
+                ('fixed-frequency', u32(timebase)),
+            ]))
+    else:
+        # dumpling: the two 16K-granule gold cores only (the A53s need 4K
+        # pages; they join in a later phase). XNU matches the boot CPU by
+        # MPIDR, so node order/state are informational.
+        for i, (mpidr, khz) in enumerate(B['cpus']):
+            cpu_nodes.append(node(f'cpu{i}', [
+                ph(),
+                ('device_type', cstr('cpu')),
+                ('compatible', cstr(B['cpu_compat']) + cstr('ARM,v8')),
+                ('reg', u32(mpidr)),
+                ('cpu-id', u32(i)),
+                ('cluster-id', u32(0)),
+                ('cluster-type', u32(0)),
+                ('die-cluster-id', u32(0)),
+                ('cluster-core-id', u32(i)),
+                ('l2-cache-id', u32(i)),
+                ('l3-cache-id', u32(0)),
+                ('state', cstr('running' if i == 0 else 'stopped')),
+                ('timebase-frequency', u32(timebase)),
+                ('clock-frequency', u32(khz)),
+                ('bus-frequency', u32(100000000)),
+                ('memory-frequency', u32(1866000000)),
+                ('peripheral-frequency', u32(timebase)),
+                ('fixed-frequency', u32(timebase)),
+            ]))
     cpus = node('cpus', [ph(), ('#address-cells', u32(1)),
                          ('#size-cells', u32(0))], cpu_nodes)
 
@@ -176,7 +230,7 @@ def build(seed=None, qemu=False, highmem=False, mem_size=None):
         ('compatible', cstr('arm,gic-v3')),
         ('interrupt-controller', b''),
         ('virtual-timer-intid', u32(QEMU_VTIMER_INTID if qemu else VTIMER_INTID)),
-        ('reg', u64(gicd - SOC_BASE, GICD_SIZE, gicr - SOC_BASE, GICR_SIZE)),
+        ('reg', u64(gicd - SOC_BASE, B['GICD_SIZE'], gicr - SOC_BASE, B['GICR_SIZE'])),
     ])
     arm_io = node('arm-io', [
         ph(),
@@ -204,17 +258,17 @@ def build(seed=None, qemu=False, highmem=False, mem_size=None):
 
     fbcon = node('sweet-fbcon', [
         ph(),
-        ('reg', u64(FB, FB_SIZE)),
-        ('width', u32(FB_W)),
-        ('height', u32(FB_H)),
-        ('stride', u32(FB_STRIDE)),
+        ('reg', u64(B['FB'], B['FB_SIZE'])),
+        ('width', u32(B['FB_W'])),
+        ('height', u32(B['FB_H'])),
+        ('stride', u32(B['FB_STRIDE'])),
     ])
 
     # bsd/dev/sweet_ufs.c: the UFS host ABL leaves running (absolute physical reg).
     ufs = node('sweet-ufs', [
         ph(),
         ('compatible', cstr('qcom,ufshc')),
-        ('reg', u64(UFS, UFS_SIZE)),
+        ('reg', u64(B['UFS'], B['UFS_SIZE'])),
     ])
 
     # pmap_compute_max_asids requires the node even when no overrides are set.
@@ -243,7 +297,7 @@ def build(seed=None, qemu=False, highmem=False, mem_size=None):
     # that string; the fajita/sdm845 strings are informational for now.
     return node('device-tree', [
         ph(),
-        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') + cstr('oneplus,fajita') + cstr('qcom,sdm845') + cstr('AppleARM')),
+        ('compatible', b''.join(cstr(c) for c in B['root_compat'])),
         ('model', cstr('iPhone10,3')),
         ('target-type', cstr('D22')),
         ('target-sub-type', cstr('D22AP')),
@@ -260,8 +314,12 @@ if __name__ == '__main__':
     for a in sys.argv:
         if a.startswith('--dram-size='):
             override = int(a.split('=', 1)[1], 0)
+    board = 'fajita'
+    for a in sys.argv:
+        if a.startswith('--board='):
+            board = a.split('=', 1)[1]
     root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv,
-                 mem_size=override)
+                 mem_size=override, board=board)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:

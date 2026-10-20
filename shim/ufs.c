@@ -13,7 +13,7 @@
 #include "console.h"
 #include "ufs.h"
 
-#define UFS_BASE	0x01d84000UL	/* ufshc@1d84000, fajita/sdm845 live FDT */
+/* UFS_BASE comes from board.h */
 
 #define REG_CAP		0x00
 #define REG_VER		0x08
@@ -164,6 +164,14 @@ static const char *fs_type(uint32_t lba)
 }
 
 /* One line per GPT entry of at least 64 MiB: name, first LBA, size in MiB (4K blocks). */
+/* clang lowers __builtin_strcmp with a runtime argument to a libc strcmp
+ * call; the shim is freestanding, so provide our own. */
+static int shim_strcmp(const char *a, const char *b)
+{
+	while (*a && *a == *b) { a++; b++; }
+	return (unsigned char)*a - (unsigned char)*b;
+}
+
 static void list_partitions(uint32_t entry_lba, uint32_t nent)
 {
 	static uint8_t ents[128 * 128] __attribute__((aligned(4096)));
@@ -186,8 +194,8 @@ static void list_partitions(uint32_t entry_lba, uint32_t nent)
 		if (((last - first + 1) >> 8) < 64)	/* keep the screen to the big ones */
 			continue;
 		con_hex2(name, "lba=", (uint32_t)first, "MiB=", (uint32_t)((last - first + 1) >> 8));
-		if (!__builtin_strcmp(name, "userdata") || !__builtin_strcmp(name, "cust") ||
-		    !__builtin_strcmp(name, "cache"))
+		if (!shim_strcmp(name, "userdata") || !shim_strcmp(name, "cust") ||
+		    !shim_strcmp(name, "cache"))
 			con_str(" fs", fs_type((uint32_t)first));
 	}
 }

@@ -7,20 +7,18 @@
  * Any unexpected exception paints a blue panic screen.
  */
 #include <stdint.h>
+#include "board.h"
 #include "console.h"
 #include "fdt.h"
 #include "mmu.h"
 #include "loader.h"
 #include "ufs.h"
 
-#define IMEM_RESTART_REASON	0x146bf65cUL	/* sdm845: IMEM 0x146bf000 + restart_reason@0x65c */
 #define RESTART_BOOTLOADER	0x77665500U
-#define PSHOLD			0x0c264000UL
 
-#define GICD_BASE		0x17a00000UL
-#define GICR_BASE		0x17a60000UL
-#define GICR_SIZE		0x100000UL
-#define GICR_PE_SIZE		0x20000UL
+/* Board constants (IMEM, PSHOLD, GIC, UFS, FB, NR_CPUS) come from board.h. */
+const uint32_t cpu_mpidr[] = CPU_MPIDR_LIST;
+
 #define GICR_TYPER		0x08
 #define GICR_WAKER		0x14
 #define GICR_SGI		0x10000
@@ -45,8 +43,6 @@
 #define PSCI_SYSTEM_SUSPEND	0xc400000eUL
 #define PSCI_SYSTEM_RESET2	0xc4000012UL
 #define SMCCC_VERSION		0x80000000UL
-
-#define NR_CPUS			8
 
 #define rsr(r) ({ uint64_t _v; __asm__ volatile("mrs %0, " r : "=r"(_v)); _v; })
 #define wsr(r, v) __asm__ volatile("msr " r ", %0" : : "r"((uint64_t)(v)))
@@ -189,14 +185,20 @@ static void __attribute__((unused)) test_smp(void)
 	stage = "smp";
 	uint64_t self = rsr("mpidr_el1") & 0xffffff;
 	int64_t ret[NR_CPUS];
+	int boot = 0;
+	for (int i = 0; i < NR_CPUS; i++)
+		if (cpu_mpidr[i] == (uint32_t)self)
+			boot = i;
 
-	for (int i = 1; i < NR_CPUS; i++)
-		ret[i] = smc(PSCI_CPU_ON, (uint64_t)i << 8, (uintptr_t)secondary_entry, i);
+	for (int i = 0; i < NR_CPUS; i++)
+		if (i != boot)
+			ret[i] = smc(PSCI_CPU_ON, CPU_ON_MPIDR(i), (uintptr_t)secondary_entry,
+				 CPU_ON_DOMAIN(i));
 	delay_ms(500);
-	for (int i = 1; i < NR_CPUS; i++) {
+	for (int i = 0; i < NR_CPUS; i++) {
 		char label[] = "CPU0";
 		label[3] = '0' + i;
-		if (((uint64_t)i << 8) == self)
+		if (i == boot)
 			con_str(label, "is boot cpu");
 		else
 			con_hex2(label, "ret=", (uint32_t)ret[i], "mpidr=",

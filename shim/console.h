@@ -1,10 +1,8 @@
 #pragma once
 #include <stdint.h>
+#include "board.h"
 
-#define FB_BASE		0x9d400000UL	/* OnePlus 6T cont_splash_region (36 MiB) */
-#define FB_W		1080
-#define FB_H		2340
-#define FB_STRIDE	(FB_W * 4)	/* a8r8g8b8, matches mainline simplefb */
+/* FB_BASE/FB_W/FB_H/FB_STRIDE come from board.h */
 
 #define RED	0xffff0000U
 #define BLUE	0xff0000a0U
