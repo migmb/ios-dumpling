@@ -15,7 +15,7 @@ index 8460893..9a748ea 100644
  MACHINE_FLAGS_ARM64_T6000 = -DARM64_BOARD_CONFIG_T6000 		-mcpu=apple-a14
  MACHINE_FLAGS_ARM64_VMAPPLE = -DARM64_BOARD_CONFIG_VMAPPLE              -march=armv8.5a
  MACHINE_FLAGS_ARM64_BCM2837 = -DARM64_BOARD_CONFIG_BCM2837
-+MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET                -march=armv8.2-a+crypto
++MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET                -mcpu=cortex-a73
  
  
  #
@@ -220,15 +220,15 @@ index 0000000..a044ad0
 +++ b/pexpert/pexpert/arm64/SWEET.h
 @@ -0,0 +1,76 @@
 +/*
-+ * Board config for the Redmi Note 10 Pro ("sweet", Qualcomm SM7150 /
-+ * Snapdragon 732G) and the OnePlus 6T ("fajita", SDM845):
-+ * Kryo 470/385 = Cortex-A76/A75 + Cortex-A55, ARMv8.2, no PAC.
-+ *
-+ * Generic ARM like BCM2837 (no APPLE_ARM64_ARCH_FAMILY: none of Apple's
-+ * implementation-defined system registers exist), 16K pages and GICv3 like
-+ * VMAPPLE. Unlike VMAPPLE the GIC has two security states (GICD_TYPER
-+ * SecurityExtn=1): Group 0 belongs to TrustZone, so every interrupt,
-+ * including the timer, is a Group 1 IRQ taken through sleh_irq().
++ * Board config for the OnePlus 5T ("dumpling", Qualcomm MSM8998):
++ * Kryo 280 = 2x Cortex-A73 + 4x Cortex-A53, ARMv8.0 (no PAN, no PAC).
++ * Built -mcpu=cortex-a73: kernel and iPhone X userland run on the A73s
++ * only for now (native LSE); the A53s join once page size and atomic-arch
++ * decisions are settled (docs/dumpling-deltas.md). Generic ARM like BCM2837
++ * (no APPLE_ARM64_ARCH_FAMILY: none of Apple's implementation-defined system
++ * registers exist), 16K pages (A73 supports the 16K granule via ARMv8.0 LPA) and GICv3 like VMAPPLE. Unlike VMAPPLE the GIC has two
++ * security states (GICD_TYPER SecurityExtn=1): Group 0 is TrustZone, so
++ * every interrupt is a Group 1 IRQ taken through sleh_irq().
 + */
 +
 +#ifndef _PEXPERT_ARM64_SWEET_H
@@ -247,7 +247,7 @@ index 0000000..a044ad0
 +#define __ARM_DEBUG__             7
 +#define __ARM_ENABLE_SWAP__       1
 +#define __ARM_V8_CRYPTO_EXTENSIONS__ 1
-+#define __ARM_PAN_AVAILABLE__     1
++/* dumpling: Cortex-A73/A53 are ARMv8.0 - MSR PAN is undefined there */
 +#define __ARM_16K_PG__            1
 +
 +#define HAS_GIC_V3                1
@@ -266,7 +266,7 @@ index 0000000..a044ad0
 +
 +#define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt
 +
-+#define GICR_PE_SIZE              0x20000 // Size of each redistributor region
++#define GICR_PE_SIZE              0x10000 // MSM8998: contiguous 64K redistributor regions
 +
 +/* GICv3 register definitions; see GICv3 spec (Arm IHI 0069G) */
 +#define GICD_CTLR                 0x0
